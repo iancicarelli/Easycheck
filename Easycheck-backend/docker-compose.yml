@@ -1,0 +1,85 @@
+services:
+  # ── Análisis estático (independiente del stack de la app) ─────────────────
+  sonarqube:
+    image: sonarqube:community
+    container_name: sonarqube
+    ports:
+      - "9000:9000"
+    networks:
+      - sonar-network
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_extensions:/opt/sonarqube/extensions
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+
+  # ── Base de datos de EasyCheck ─────────────────────────────────────────────
+  # postgres:16-alpine: major madura (soportada hasta 2028) y liviana; las
+  # credenciales por defecto son SOLO de desarrollo — sobreescribir con
+  # variables de entorno (POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB).
+  postgres:
+    image: postgres:16-alpine
+    container_name: easycheck-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-easycheck}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-easycheck_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-easycheck}
+    ports:
+      # Host 5433 por defecto (5432 suele estar tomado por un Postgres local);
+      # dentro de la red de compose el backend usa postgres:5432 igualmente.
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-easycheck} -d ${POSTGRES_DB:-easycheck}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - easycheck-network
+
+  # ── Backend NestJS ─────────────────────────────────────────────────────────
+  # El entrypoint espera a Postgres, corre el seed idempotente y arranca la
+  # API. DB_HOST=postgres (nombre del servicio) activa el modo TypeORM.
+  backend:
+    build: ./easycheck-backend
+    container_name: easycheck-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-easycheck}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-easycheck_dev}
+      DB_NAME: ${POSTGRES_DB:-easycheck}
+      QR_SIGNING_SECRET: ${QR_SIGNING_SECRET}
+      QR_TTL_SECONDS: ${QR_TTL_SECONDS:-300}
+      READER_API_KEY: ${READER_API_KEY}
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    networks:
+      - easycheck-network
+
+networks:
+  # Red del análisis estático (histórica; el scanner se une a
+  # easycheck-backend_sonar-network, ver README).
+  sonar-network:
+    driver: bridge
+  # Red propia del stack app+DB, separada de sonar para no acoplarlos.
+  easycheck-network:
+    driver: bridge
+
+volumes:
+  sonarqube_data:
+  sonarqube_logs:
+  sonarqube_extensions:
+  # Datos de Postgres; `docker compose down -v` lo borra para regenerar el
+  # esquema desde cero (ver SEED.md).
+  postgres_data:
